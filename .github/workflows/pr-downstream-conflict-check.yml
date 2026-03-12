@@ -1,0 +1,67 @@
+name: Trigger Downstream Conflict Check
+run-name: trigger-downstream-conflict-check
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+    branches: [main]
+  issue_comment:
+    types: [created]
+jobs:
+  trigger-conflict-check:
+    runs-on: ubuntu-latest
+    environment: repository-dispatch
+    if: |
+      (github.event_name == 'pull_request') ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null
+      && github.event.comment.body == '/check-conflicts')
+    steps:
+      - name: Get PR essential info
+        id: get_pr_info
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            echo "pr_head_sha=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
+            echo "pr_head_ref=${{ github.event.pull_request.head.ref }}" >> $GITHUB_OUTPUT
+            echo "pr_base_ref=${{ github.event.pull_request.base.ref }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "issue_comment" ]; then
+            PR_NUMBER=$(echo "${{ github.event.issue.url }}" | awk -F'/' '{print $NF}')
+            echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+            # Fetch PR details using GitHub API
+            PR_DETAILS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER)
+            PR_HEAD_SHA=$(echo "$PR_DETAILS" | jq -r '.head.sha')
+            PR_BASE_REF=$(echo "$PR_DETAILS" | jq -r '.base.ref')
+            PR_HEAD_REF=$(echo "$PR_DETAILS" | jq -r '.head.ref')
+            echo "pr_head_sha=$PR_HEAD_SHA" >> $GITHUB_OUTPUT
+            echo "pr_head_ref=$PR_HEAD_REF" >> $GITHUB_OUTPUT
+            echo "pr_base_ref=$PR_BASE_REF" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create pending commit status
+        env:
+          GH_TOKEN: ${{ secrets.REPOSITORY_DISPATCH_TOKEN }}
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/statuses/${{ steps.get_pr_info.outputs.pr_head_sha }} \
+            -f state='pending' \
+            -f context='Downstream Conflict Check' \
+            -f description='Checking for conflicts with downstream repository...'
+
+      - name: Dispatch downstream conflict check event
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.REPOSITORY_DISPATCH_TOKEN }}
+          repository: siyuan1996/automerge-config
+          event-type: pr-conflict-check
+          client-payload: |-
+            {
+              "upstream_repo": "${{ github.repository }}",
+              "pr_number": "${{ steps.get_pr_info.outputs.pr_number }}",
+              "pr_head_ref": "${{ steps.get_pr_info.outputs.pr_head_ref }}",
+              "pr_head_sha": "${{ steps.get_pr_info.outputs.pr_head_sha }}",
+              "pr_base_ref": "${{ steps.get_pr_info.outputs.pr_base_ref }}"
+            }
+
